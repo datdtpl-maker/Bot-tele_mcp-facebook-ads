@@ -208,3 +208,7 @@ Tham khảo: [Meta Marketing API Postman collection](https://www.postman.com/met
 - Chỉ thêm Telegram user id đáng tin vào `TELEGRAM_ALLOWED_USER_IDS`.
 - Chạy live theo 2 bước: tạo campaign `PAUSED`, kiểm tra trong Ads Manager, rồi mới `/activate`.
 - Nên thêm duyệt 2 người trước khi cho bot thay đổi ngân sách hoặc bật campaign live.
+
+## Tác giả
+
+Người thực hiện: **Danny DT (Thành Đạt)**
