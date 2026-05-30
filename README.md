@@ -16,7 +16,7 @@ Project này tạo một MCP server nội bộ để quản lý Meta/Facebook Ad
 - Ghi log thao tác vào Google Sheets nếu bật cấu hình.
 - Lưu ngữ cảnh phiên chat vào Supabase nếu bật cấu hình.
 
-Chưa tự động tạo full funnel ad set + creative + ad hoàn chỉnh, vì phần đó cần thêm page id, pixel id, conversion event, creative asset, targeting, budget, schedule và quy trình duyệt nội bộ. Bộ này đã đặt nền để mở rộng các tool đó an toàn.
+Đã có flow full funnel an toàn: bot preview hoặc tạo `campaign + ad set + creative + ad` ở trạng thái `PAUSED`. Người quản trị vẫn cần kiểm tra Ads Manager trước khi bật chạy thật, nhất là targeting, ngân sách, pixel/conversion event và creative policy.
 
 ## Kiến trúc
 
@@ -50,6 +50,9 @@ META_GRAPH_API_VERSION=v22.0
 DEFAULT_AD_ACCOUNT_ID=act_1234567890
 BOT_TIMEZONE=Asia/Bangkok
 
+OPENAI_API_KEY=sk-replace_me
+OPENAI_MODEL=gpt-5.4-mini
+
 SAFE_MODE=true
 ```
 
@@ -73,6 +76,17 @@ Bot hỗ trợ 2 kiểu thao tác:
 
 - Nhắn tự nhiên như đang trao đổi với trợ lý.
 - Dùng lệnh slash cố định như `/campaigns`, `/analyze`, `/activate`.
+
+Nếu có `OPENAI_API_KEY`, bot dùng OpenAI Structured Outputs để hiểu ý định tiếng Việt linh hoạt hơn, ví dụ:
+
+```text
+Camp nào hôm nay đốt tiền mà không ra đơn?
+Tắt giúp tôi camp lỗ nhất 7 ngày qua
+So sánh ngân sách mấy camp đang chạy
+Tạo camp inbox từ bài này, ngân sách 100000, chạy cho page này
+```
+
+OpenAI chỉ dùng để phân tích câu nói thành intent/tham số JSON. Bot vẫn tự kiểm quyền, safe mode, xác nhận và gọi MCP tool nội bộ để thao tác Meta Ads.
 
 ### Nhắn tự nhiên
 
@@ -102,15 +116,37 @@ Tạo chiến dịch tin nhắn tên "Camp inbox A" act_123456789 page https://f
 Tạo chiến dịch chuyển đổi tên "Camp sale A" act_123456789 page https://facebook.com/tenpage bài viết https://facebook.com/tenpage/posts/123
 ```
 
+Bot sẽ dựng full funnel ở dạng bản nháp:
+
+- Campaign `PAUSED`.
+- Ad set `PAUSED`.
+- Creative dùng bài viết Page qua `object_story_id`.
+- Ad `PAUSED`.
+
 Điều kiện bắt buộc:
 
 - Tin nhắn phải có `act_...`.
 - Phải có tên campaign trong dấu ngoặc kép sau chữ `tên`.
 - Phải có link Page và link bài viết.
 - Token Meta đang cấu hình phải truy cập được Page đó, và Page phải nằm trong danh sách `promote_pages` của tài khoản quảng cáo. Nếu tài khoản quảng cáo không có quyền quảng bá Page, bot sẽ báo lỗi và không tạo bản nháp.
-- Mặc định bot chỉ tạo preview/dry-run, chưa tạo ad set, creative, ad live và chưa tiêu tiền.
+- Mặc định bot chỉ tạo preview/dry-run, chưa gửi mutation lên Meta và chưa tiêu tiền.
 
-Lý do chưa tạo ad live ngay từ link bài viết: để chạy thật cần thêm ngân sách, targeting, pixel/conversion event, optimization goal, billing event và bước duyệt trước khi bật. Phần campaign vẫn được tạo ở trạng thái `PAUSED` nếu dùng lệnh live.
+Để tạo thật full funnel:
+
+- `.env` phải có `SAFE_MODE=false`.
+- Tin nhắn phải nói rõ muốn chạy/tạo live, ví dụ có chữ `live`, `chạy thật`, hoặc `CONFIRM_LIVE`.
+- Bot vẫn tạo mọi object ở trạng thái `PAUSED`; sau đó người quản trị kiểm tra Ads Manager rồi mới bật campaign.
+
+Cấu hình mặc định cho full funnel:
+
+```dotenv
+DEFAULT_DAILY_BUDGET=100000
+DEFAULT_TARGETING={"geo_locations":{"countries":["VN"]},"age_min":18,"age_max":55}
+DEFAULT_PIXEL_ID=
+DEFAULT_CONVERSION_EVENT=PURCHASE
+```
+
+Với campaign chuyển đổi, bắt buộc có `DEFAULT_PIXEL_ID`.
 
 ### Lệnh slash
 

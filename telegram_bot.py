@@ -15,6 +15,7 @@ from mcp.client.stdio import stdio_client
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
+from ai_intent import openai_enabled, parse_intent
 from google_sheets_logger import log_action
 from supabase_store import load_session, save_session
 
@@ -36,6 +37,22 @@ def safe_mode() -> bool:
     return os.getenv("SAFE_MODE", "true").lower() == "true"
 
 
+def default_daily_budget() -> int:
+    return int(os.getenv("DEFAULT_DAILY_BUDGET", "100000"))
+
+
+def default_targeting() -> dict[str, Any]:
+    return json.loads(os.getenv("DEFAULT_TARGETING", '{"geo_locations":{"countries":["VN"]},"age_min":18,"age_max":55}'))
+
+
+def default_pixel_id() -> str | None:
+    return os.getenv("DEFAULT_PIXEL_ID") or None
+
+
+def default_conversion_event() -> str | None:
+    return os.getenv("DEFAULT_CONVERSION_EVENT") or None
+
+
 def compact_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2)[:3500]
 
@@ -54,6 +71,20 @@ def last_days_range(days: int) -> tuple[str, str]:
     today = datetime.now(ZoneInfo(os.getenv("BOT_TIMEZONE", "Asia/Bangkok"))).date()
     since = today - timedelta(days=days - 1)
     return since.isoformat(), today.isoformat()
+
+
+def range_from_intent(intent: dict[str, Any]) -> tuple[str, str]:
+    preset = intent.get("date_preset") or "today"
+    if preset == "last_30_days":
+        return last_days_range(30)
+    if preset == "last_7_days":
+        return last_days_range(7)
+    if preset == "yesterday":
+        day = datetime.now(ZoneInfo(os.getenv("BOT_TIMEZONE", "Asia/Bangkok"))).date() - timedelta(days=1)
+        return day.isoformat(), day.isoformat()
+    if preset == "custom" and intent.get("since") and intent.get("until"):
+        return intent["since"], intent["until"]
+    return today_range()
 
 
 def money_minor_to_text(value: int | float | str | None) -> str:
@@ -387,6 +418,153 @@ async def activate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await set_status(update, context, "ACTIVE")
 
 
+async def handle_ai_intent(update: Update, intent: dict[str, Any]) -> bool:
+    ad_account_id = intent.get("ad_account_id") or default_account()
+    if not ad_account_id:
+        await update.message.reply_text("Ban chua cau hinh DEFAULT_AD_ACCOUNT_ID hoac chua nhap act_... trong tin nhan.")
+        return True
+
+    name = intent.get("intent")
+    if name == "count_active_campaigns":
+        payload = {"ad_account_id": ad_account_id, "limit": 100}
+        result = await call_mcp_tool("count_active_campaigns", payload)
+        await text_reply_and_log(update, "ai_active_campaigns", payload, result, format_active_campaigns(result))
+        return True
+
+    if name == "compare_budget":
+        payload = {"ad_account_id": ad_account_id, "limit": 50}
+        result = await call_mcp_tool("campaign_budget_report", payload)
+        await text_reply_and_log(update, "ai_budget_report", payload, result, format_budget_report(result))
+        return True
+
+    if name == "compare_performance":
+        since, until = range_from_intent(intent)
+        payload = {
+            "ad_account_id": ad_account_id,
+            "since": since,
+            "until": until,
+            "level": intent.get("level") or "campaign",
+            "goal": intent.get("goal") or "conversions",
+            "limit": 100,
+        }
+        result = await call_mcp_tool("analyze_performance", payload)
+        await text_reply_and_log(update, "ai_analyze", payload, result, format_analysis(result))
+        return True
+
+    if name in {"activate_campaign", "pause_campaign", "status"}:
+        query = intent.get("campaign_query")
+        if not query:
+            await update.message.reply_text("Ban muon thao tac campaign nao? Hay gui ten hoac ID campaign.")
+            return True
+        found_payload = {"ad_account_id": ad_account_id, "query": query, "limit": 100}
+        found = await call_mcp_tool("find_campaign", found_payload)
+        match = found.get("match")
+        if not match:
+            await text_reply_and_log(
+                update,
+                f"ai_{name}_find",
+                found_payload,
+                found,
+                "Minh chua tim duoc dung 1 campaign. Cac campaign gan dung:\n" + campaign_lines(found.get("candidates", [])),
+            )
+            return True
+        if name == "status":
+            await text_reply_and_log(
+                update,
+                "ai_status",
+                found_payload,
+                match,
+                f"Campaign: {match.get('name')}\nID: {match.get('id')}\nStatus: {match.get('status')}\nEffective: {match.get('effective_status')}\nObjective: {match.get('objective')}",
+            )
+            return True
+        new_status = "ACTIVE" if name == "activate_campaign" else "PAUSED"
+        payload = {"campaign_id": match["id"], "status": new_status}
+        if safe_mode() and new_status == "ACTIVE":
+            result = {"dry_run": True, "campaign": match, "blocked_live_reason": "SAFE_MODE=true"}
+            await text_reply_and_log(
+                update,
+                "ai_activate_dry_run",
+                payload,
+                result,
+                f"SAFE_MODE dang bat nen minh chua bat that.\nCampaign: {match.get('name')} | ID: {match.get('id')}\nMuon chay that: dat SAFE_MODE=false roi gui /activate {match.get('id')} CONFIRM",
+            )
+            return True
+        result = await call_mcp_tool("set_campaign_status", payload)
+        verb = "bat" if new_status == "ACTIVE" else "tat"
+        await text_reply_and_log(update, f"ai_{verb}", payload, result, f"Da {verb} campaign: {match.get('name')} | ID: {match.get('id')}")
+        return True
+
+    if name == "create_full_funnel":
+        missing = list(intent.get("missing_fields") or [])
+        required_missing = [
+            field
+            for field in ["campaign_name", "page_url", "post_url"]
+            if not intent.get(field)
+        ]
+        missing = sorted(set(missing + required_missing))
+        if missing:
+            await update.message.reply_text(
+                "De tao full funnel, ban bo sung: "
+                + ", ".join(missing)
+                + '\nVi du: Tao chien dich tin nhan ten "Camp A" act_123 page https://facebook.com/page bai viet https://facebook.com/page/posts/123 ngan sach 100000'
+            )
+            return True
+        goal = intent.get("goal") or "messages"
+        pixel_id = default_pixel_id()
+        if goal == "conversions" and not pixel_id:
+            await update.message.reply_text("Campaign chuyen doi can DEFAULT_PIXEL_ID trong .env hoac bo sung pixel_id trong code parser truoc khi tao live.")
+            return True
+        payload = {
+            "ad_account_id": ad_account_id,
+            "name": intent["campaign_name"],
+            "goal": goal,
+            "page_url": intent["page_url"],
+            "post_url": intent["post_url"],
+            "daily_budget": int(intent.get("daily_budget") or default_daily_budget()),
+            "targeting": default_targeting(),
+            "pixel_id": pixel_id,
+            "conversion_event": default_conversion_event(),
+        }
+        if safe_mode() or not intent.get("wants_live"):
+            result = await call_mcp_tool("preview_full_funnel", payload)
+            await text_reply_and_log(
+                update,
+                "ai_full_funnel_preview",
+                payload,
+                result,
+                "Minh da lap ban nhap full funnel an toan, chua tao live:\n"
+                f"- Campaign: {result['campaign']['name']} | objective: {result['campaign']['objective']}\n"
+                f"- Ad set: daily_budget={result['adset']['daily_budget']} | optimization={result['adset']['optimization_goal']}\n"
+                f"- Creative: object_story_id={result['creative']['object_story_id']}\n"
+                f"- Ad: {result['ad']['name']}\n"
+                f"- Page: {result['page_access']['page_name']} | ID: {result['page_access']['page_id']}\n"
+                "Neu muon tao that: dat SAFE_MODE=false va nhan lai co chu live/CONFIRM_LIVE. Tat ca object van PAUSED.",
+            )
+            return True
+        result = await call_mcp_tool("create_full_funnel_paused", payload)
+        await text_reply_and_log(
+            update,
+            "ai_full_funnel_live",
+            payload,
+            result,
+            "Da tao full funnel o trang thai PAUSED:\n"
+            f"- Campaign ID: {result['campaign'].get('id')}\n"
+            f"- Ad set ID: {result['adset'].get('id')}\n"
+            f"- Creative ID: {result['creative'].get('id')}\n"
+            f"- Ad ID: {result['ad'].get('id')}\n"
+            "Hay kiem tra trong Ads Manager truoc khi /activate campaign.",
+        )
+        return True
+
+    if name == "help":
+        await update.message.reply_text(
+            "Ban co the hoi: hom nay co bao nhieu campaign dang chay, so sanh camp nao tot, so sanh ngan sach, bat/tat campaign, tao campaign tu link page + bai viet."
+        )
+        return True
+
+    return False
+
+
 async def natural_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await guard(update):
         return
@@ -399,6 +577,14 @@ async def natural_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     try:
+        if openai_enabled():
+            user_id = update.effective_user.id if update.effective_user else None
+            session = load_session(user_id)
+            intent = parse_intent(text, session)
+            handled = await handle_ai_intent(update, intent)
+            if handled:
+                return
+
         if ("bao nhieu" in normalized or "may" in normalized) and "dang chay" in normalized:
             payload = {"ad_account_id": ad_account_id, "limit": 100}
             result = await call_mcp_tool("count_active_campaigns", payload)
@@ -495,19 +681,25 @@ async def natural_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "name": name_match.group(1),
                 "page_url": urls[0],
                 "post_url": urls[1],
+                "daily_budget": default_daily_budget(),
+                "targeting": default_targeting(),
+                "pixel_id": default_pixel_id(),
+                "conversion_event": default_conversion_event(),
             }
-            result = await call_mcp_tool("preview_post_campaign", payload)
+            if payload["goal"] == "conversions" and not payload["pixel_id"]:
+                await update.message.reply_text("Campaign chuyen doi can DEFAULT_PIXEL_ID trong .env truoc khi tao full funnel.")
+                return
+            result = await call_mcp_tool("preview_full_funnel", payload)
             await text_reply_and_log(
                 update,
-                "natural_preview_post_campaign",
+                "natural_preview_full_funnel",
                 payload,
                 result,
-                "Minh da kiem tra duoc Page va tao ban nhap an toan:\n"
-                f"- Ten: {result.get('name')}\n"
-                f"- Goal: {result.get('goal')}\n"
-                f"- Objective: {result.get('objective')}\n"
-                f"- Page: {result.get('page_access', {}).get('page_name')} | ID: {result.get('page_access', {}).get('page_id')}\n"
-                f"- Bai viet: {result.get('post_url')}\n"
+                "Minh da tao ban nhap full funnel an toan:\n"
+                f"- Campaign: {result['campaign']['name']} | objective: {result['campaign']['objective']}\n"
+                f"- Ad set: daily_budget={result['adset']['daily_budget']} | optimization={result['adset']['optimization_goal']}\n"
+                f"- Creative: object_story_id={result['creative']['object_story_id']}\n"
+                f"- Page: {result['page_access']['page_name']} | ID: {result['page_access']['page_id']}\n"
                 "- Trang thai: dry-run, chua tao/chua tieu tien.",
             )
             return

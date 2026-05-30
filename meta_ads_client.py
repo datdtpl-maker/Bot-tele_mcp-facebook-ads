@@ -13,6 +13,13 @@ CAMPAIGN_OBJECTIVES = {
     "leads": "OUTCOME_LEADS",
 }
 
+GOAL_DEFAULTS = {
+    "messages": {"optimization_goal": "CONVERSATIONS", "billing_event": "IMPRESSIONS"},
+    "conversions": {"optimization_goal": "OFFSITE_CONVERSIONS", "billing_event": "IMPRESSIONS"},
+    "leads": {"optimization_goal": "LEAD_GENERATION", "billing_event": "IMPRESSIONS"},
+    "traffic": {"optimization_goal": "LINK_CLICKS", "billing_event": "LINK_CLICKS"},
+}
+
 
 class MetaAdsError(RuntimeError):
     pass
@@ -44,6 +51,20 @@ class MetaAdsClient:
             message = error.get("message", str(error)) if isinstance(error, dict) else str(error)
             raise MetaAdsError(message)
 
+        return data
+
+    def _request_json(self, method: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        params = {"access_token": self.access_token}
+        response = requests.request(method.upper(), url, params=params, json=payload, timeout=30)
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise MetaAdsError(f"Meta API returned non-JSON response: {response.text[:300]}") from exc
+        if response.status_code >= 400 or "error" in data:
+            error = data.get("error", data)
+            message = error.get("message", str(error)) if isinstance(error, dict) else str(error)
+            raise MetaAdsError(message)
         return data
 
     def list_ad_accounts(self, limit: int = 25) -> dict[str, Any]:
@@ -198,6 +219,7 @@ class MetaAdsClient:
             {
                 "page_access": page,
                 "post_url": post_url,
+                "post_id": self._post_id_from_url(post_url),
                 "required_next_fields_for_live_ad": [
                     "daily_budget",
                     "targeting",
@@ -209,6 +231,153 @@ class MetaAdsClient:
             }
         )
         return preview
+
+    def preview_full_funnel(
+        self,
+        ad_account_id: str,
+        name: str,
+        goal: str,
+        page_url: str,
+        post_url: str,
+        daily_budget: int,
+        targeting: dict[str, Any],
+        pixel_id: str | None = None,
+        conversion_event: str | None = None,
+    ) -> dict[str, Any]:
+        page = self.validate_ad_account_page_access(ad_account_id=ad_account_id, page_url=page_url)
+        post_id = self._post_id_from_url(post_url)
+        defaults = GOAL_DEFAULTS.get(goal, GOAL_DEFAULTS["traffic"])
+        return {
+            "dry_run": True,
+            "ad_account_id": ad_account_id,
+            "goal": goal,
+            "campaign": {
+                "name": name,
+                "objective": CAMPAIGN_OBJECTIVES.get(goal, goal),
+                "status": "PAUSED",
+            },
+            "adset": {
+                "name": f"{name} - Ad set 1",
+                "daily_budget": daily_budget,
+                "optimization_goal": defaults["optimization_goal"],
+                "billing_event": defaults["billing_event"],
+                "targeting": targeting,
+                "status": "PAUSED",
+                "promoted_object": self._promoted_object(goal, pixel_id, conversion_event),
+            },
+            "creative": {
+                "name": f"{name} - Creative 1",
+                "object_story_id": f"{page['page_id']}_{post_id}",
+            },
+            "ad": {
+                "name": f"{name} - Ad 1",
+                "status": "PAUSED",
+            },
+            "page_access": page,
+            "post_url": post_url,
+            "note": "Preview only. No Meta API mutation was sent.",
+        }
+
+    def create_full_funnel_paused(
+        self,
+        ad_account_id: str,
+        name: str,
+        goal: str,
+        page_url: str,
+        post_url: str,
+        daily_budget: int,
+        targeting: dict[str, Any],
+        pixel_id: str | None = None,
+        conversion_event: str | None = None,
+    ) -> dict[str, Any]:
+        preview = self.preview_full_funnel(
+            ad_account_id=ad_account_id,
+            name=name,
+            goal=goal,
+            page_url=page_url,
+            post_url=post_url,
+            daily_budget=daily_budget,
+            targeting=targeting,
+            pixel_id=pixel_id,
+            conversion_event=conversion_event,
+        )
+        campaign = self.create_campaign_for_goal(ad_account_id=ad_account_id, name=name, goal=goal)
+        campaign_id = campaign["id"]
+        adset = self.create_adset_paused(
+            ad_account_id=ad_account_id,
+            campaign_id=campaign_id,
+            name=preview["adset"]["name"],
+            daily_budget=daily_budget,
+            optimization_goal=preview["adset"]["optimization_goal"],
+            billing_event=preview["adset"]["billing_event"],
+            targeting=targeting,
+            promoted_object=preview["adset"]["promoted_object"],
+        )
+        creative = self.create_post_creative(
+            ad_account_id=ad_account_id,
+            name=preview["creative"]["name"],
+            object_story_id=preview["creative"]["object_story_id"],
+        )
+        ad = self.create_ad_paused(
+            ad_account_id=ad_account_id,
+            name=preview["ad"]["name"],
+            adset_id=adset["id"],
+            creative_id=creative["id"],
+        )
+        return {
+            "dry_run": False,
+            "campaign": campaign,
+            "adset": adset,
+            "creative": creative,
+            "ad": ad,
+            "status": "PAUSED",
+            "note": "Full funnel was created paused. Review in Ads Manager before activation.",
+        }
+
+    def create_adset_paused(
+        self,
+        ad_account_id: str,
+        campaign_id: str,
+        name: str,
+        daily_budget: int,
+        optimization_goal: str,
+        billing_event: str,
+        targeting: dict[str, Any],
+        promoted_object: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "name": name,
+            "campaign_id": campaign_id,
+            "daily_budget": daily_budget,
+            "billing_event": billing_event,
+            "optimization_goal": optimization_goal,
+            "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+            "targeting": targeting,
+            "status": "PAUSED",
+        }
+        if promoted_object:
+            payload["promoted_object"] = promoted_object
+        return self._request_json("POST", f"{ad_account_id}/adsets", payload)
+
+    def create_post_creative(self, ad_account_id: str, name: str, object_story_id: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"{ad_account_id}/adcreatives",
+            name=name,
+            object_story_id=object_story_id,
+        )
+
+    def create_ad_paused(self, ad_account_id: str, name: str, adset_id: str, creative_id: str) -> dict[str, Any]:
+        return self._request_json(
+            "POST",
+            f"{ad_account_id}/ads",
+            {
+                "name": name,
+                "adset_id": adset_id,
+                "creative": {"creative_id": creative_id},
+                "status": "PAUSED",
+            },
+        )
 
     def _page_ref_from_url(self, page_url: str) -> str:
         parsed = urlparse(page_url)
@@ -222,6 +391,29 @@ class MetaAdsClient:
             if match:
                 return match.group(1)
         return parts[0]
+
+    def _post_id_from_url(self, post_url: str) -> str:
+        parsed = urlparse(post_url)
+        parts = [part for part in parsed.path.split("/") if part]
+        for marker in ["posts", "videos", "reel"]:
+            if marker in parts:
+                idx = parts.index(marker)
+                if idx + 1 < len(parts):
+                    return parts[idx + 1]
+        story = re.search(r"(?:story_fbid|fbid)=([^&]+)", parsed.query)
+        if story:
+            return story.group(1)
+        numeric = [part for part in parts if part.isdigit()]
+        if numeric:
+            return numeric[-1]
+        raise MetaAdsError("Could not extract post id from post_url. Use a Page post URL containing /posts/<id> or story_fbid.")
+
+    def _promoted_object(self, goal: str, pixel_id: str | None, conversion_event: str | None) -> dict[str, Any] | None:
+        if goal == "conversions":
+            if not pixel_id:
+                raise MetaAdsError("pixel_id is required for conversions campaigns.")
+            return {"pixel_id": pixel_id, "custom_event_type": conversion_event or "PURCHASE"}
+        return None
 
     def create_campaign_paused(
         self,

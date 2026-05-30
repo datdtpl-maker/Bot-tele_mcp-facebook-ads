@@ -122,6 +122,32 @@ def preview_post_campaign(
 
 
 @mcp.tool()
+def preview_full_funnel(
+    ad_account_id: str,
+    name: str,
+    goal: str,
+    page_url: str,
+    post_url: str,
+    daily_budget: int,
+    targeting: dict[str, Any],
+    pixel_id: str | None = None,
+    conversion_event: str | None = None,
+) -> dict[str, Any]:
+    """Preview campaign, ad set, post creative, and ad without changing Meta Ads."""
+    return MetaAdsClient().preview_full_funnel(
+        ad_account_id=ad_account_id,
+        name=name,
+        goal=goal,
+        page_url=page_url,
+        post_url=post_url,
+        daily_budget=daily_budget,
+        targeting=targeting,
+        pixel_id=pixel_id,
+        conversion_event=conversion_event,
+    )
+
+
+@mcp.tool()
 def create_campaign_paused(
     ad_account_id: str,
     name: str,
@@ -143,6 +169,32 @@ def create_campaign_for_goal(
 ) -> dict[str, Any]:
     """Create a paused campaign for messages/conversions/leads/traffic."""
     return MetaAdsClient().create_campaign_for_goal(ad_account_id=ad_account_id, name=name, goal=goal)
+
+
+@mcp.tool()
+def create_full_funnel_paused(
+    ad_account_id: str,
+    name: str,
+    goal: str,
+    page_url: str,
+    post_url: str,
+    daily_budget: int,
+    targeting: dict[str, Any],
+    pixel_id: str | None = None,
+    conversion_event: str | None = None,
+) -> dict[str, Any]:
+    """Create campaign, ad set, post creative, and ad, all paused."""
+    return MetaAdsClient().create_full_funnel_paused(
+        ad_account_id=ad_account_id,
+        name=name,
+        goal=goal,
+        page_url=page_url,
+        post_url=post_url,
+        daily_budget=daily_budget,
+        targeting=targeting,
+        pixel_id=pixel_id,
+        conversion_event=conversion_event,
+    )
 
 
 @mcp.tool()
