@@ -24,6 +24,24 @@ def list_campaigns(ad_account_id: str, limit: int = 25) -> dict[str, Any]:
 
 
 @mcp.tool()
+def count_active_campaigns(ad_account_id: str, limit: int = 100) -> dict[str, Any]:
+    """Count active campaigns and return their names and ids."""
+    return MetaAdsClient().count_active_campaigns(ad_account_id=ad_account_id, limit=limit)
+
+
+@mcp.tool()
+def find_campaign(ad_account_id: str, query: str, limit: int = 100) -> dict[str, Any]:
+    """Find a campaign by id or partial name."""
+    return MetaAdsClient().find_campaign(ad_account_id=ad_account_id, query=query, limit=limit)
+
+
+@mcp.tool()
+def campaign_budget_report(ad_account_id: str, limit: int = 50) -> dict[str, Any]:
+    """Compare campaign/ad set budgets for campaigns in an ad account."""
+    return MetaAdsClient().campaign_budget_report(ad_account_id=ad_account_id, limit=limit)
+
+
+@mcp.tool()
 def list_adsets(campaign_id: str, limit: int = 25) -> dict[str, Any]:
     """List ad sets for a campaign."""
     return MetaAdsClient().list_adsets(campaign_id=campaign_id, limit=limit)
@@ -83,6 +101,24 @@ def analyze_performance(
 def preview_campaign(ad_account_id: str, name: str, goal: str = "conversions") -> dict[str, Any]:
     """Preview a messages/conversions/leads/traffic campaign without changing Meta Ads."""
     return MetaAdsClient().preview_campaign(ad_account_id=ad_account_id, name=name, goal=goal)
+
+
+@mcp.tool()
+def preview_post_campaign(
+    ad_account_id: str,
+    name: str,
+    goal: str,
+    page_url: str,
+    post_url: str,
+) -> dict[str, Any]:
+    """Preview a campaign from a Page URL and post URL, validating Page access first."""
+    return MetaAdsClient().preview_post_campaign(
+        ad_account_id=ad_account_id,
+        name=name,
+        goal=goal,
+        page_url=page_url,
+        post_url=post_url,
+    )
 
 
 @mcp.tool()

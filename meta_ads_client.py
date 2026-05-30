@@ -1,5 +1,7 @@
 import os
+import re
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -56,7 +58,7 @@ class MetaAdsClient:
         return self._request(
             "GET",
             f"{ad_account_id}/campaigns",
-            fields="id,name,status,effective_status,objective,created_time,updated_time",
+            fields="id,name,status,effective_status,objective,daily_budget,lifetime_budget,created_time,updated_time",
             limit=limit,
         )
 
@@ -114,6 +116,112 @@ class MetaAdsClient:
             "status": "PAUSED",
             "note": "Preview only. No Meta API mutation was sent.",
         }
+
+    def find_campaign(self, ad_account_id: str, query: str, limit: int = 100) -> dict[str, Any]:
+        campaigns = self.list_campaigns(ad_account_id=ad_account_id, limit=limit).get("data", [])
+        exact = [item for item in campaigns if item.get("id") == query]
+        if exact:
+            return {"match": exact[0], "candidates": exact}
+        query_lower = query.lower()
+        candidates = [item for item in campaigns if query_lower in item.get("name", "").lower()]
+        return {"match": candidates[0] if len(candidates) == 1 else None, "candidates": candidates[:10]}
+
+    def count_active_campaigns(self, ad_account_id: str, limit: int = 100) -> dict[str, Any]:
+        campaigns = self.list_campaigns(ad_account_id=ad_account_id, limit=limit).get("data", [])
+        active = [
+            item
+            for item in campaigns
+            if item.get("status") == "ACTIVE" or item.get("effective_status") == "ACTIVE"
+        ]
+        return {"count": len(active), "campaigns": active, "total_checked": len(campaigns)}
+
+    def campaign_budget_report(self, ad_account_id: str, limit: int = 50) -> dict[str, Any]:
+        campaigns = self.list_campaigns(ad_account_id=ad_account_id, limit=limit).get("data", [])
+        rows = []
+        for campaign in campaigns:
+            adsets = self.list_adsets(campaign["id"], limit=100).get("data", [])
+            daily_budget = sum(int(item.get("daily_budget") or 0) for item in adsets)
+            lifetime_budget = sum(int(item.get("lifetime_budget") or 0) for item in adsets)
+            rows.append(
+                {
+                    "campaign_id": campaign.get("id"),
+                    "campaign_name": campaign.get("name"),
+                    "status": campaign.get("status"),
+                    "effective_status": campaign.get("effective_status"),
+                    "campaign_daily_budget": int(campaign.get("daily_budget") or 0),
+                    "campaign_lifetime_budget": int(campaign.get("lifetime_budget") or 0),
+                    "adset_daily_budget": daily_budget,
+                    "adset_lifetime_budget": lifetime_budget,
+                    "adset_count": len(adsets),
+                }
+            )
+        rows.sort(key=lambda item: item["campaign_daily_budget"] + item["adset_daily_budget"], reverse=True)
+        return {"data": rows}
+
+    def validate_page_access(self, page_url: str) -> dict[str, Any]:
+        page_ref = self._page_ref_from_url(page_url)
+        page = self._request("GET", page_ref, fields="id,name,link")
+        return {
+            "ok": True,
+            "page_id": page.get("id"),
+            "page_name": page.get("name"),
+            "page_link": page.get("link", page_url),
+        }
+
+    def validate_ad_account_page_access(self, ad_account_id: str, page_url: str) -> dict[str, Any]:
+        page = self.validate_page_access(page_url)
+        promote_pages = self._request(
+            "GET",
+            f"{ad_account_id}/promote_pages",
+            fields="id,name,link",
+            limit=100,
+        ).get("data", [])
+        matched = [item for item in promote_pages if item.get("id") == page["page_id"]]
+        if not matched:
+            raise MetaAdsError(
+                "The configured ad account/token can read the Page, but the Page is not returned in this ad account's promote_pages list."
+            )
+        page["ad_account_can_promote_page"] = True
+        return page
+
+    def preview_post_campaign(
+        self,
+        ad_account_id: str,
+        name: str,
+        goal: str,
+        page_url: str,
+        post_url: str,
+    ) -> dict[str, Any]:
+        page = self.validate_ad_account_page_access(ad_account_id=ad_account_id, page_url=page_url)
+        preview = self.preview_campaign(ad_account_id=ad_account_id, name=name, goal=goal)
+        preview.update(
+            {
+                "page_access": page,
+                "post_url": post_url,
+                "required_next_fields_for_live_ad": [
+                    "daily_budget",
+                    "targeting",
+                    "billing_event",
+                    "optimization_goal",
+                    "pixel_id and conversion_event for conversions",
+                    "creative/ad creation from post_id",
+                ],
+            }
+        )
+        return preview
+
+    def _page_ref_from_url(self, page_url: str) -> str:
+        parsed = urlparse(page_url)
+        if not parsed.netloc:
+            return page_url
+        parts = [part for part in parsed.path.split("/") if part]
+        if not parts:
+            raise MetaAdsError("page_url must contain a Page username or id")
+        if parts[0] == "profile.php":
+            match = re.search(r"(?:^|[?&])id=([^&]+)", parsed.query)
+            if match:
+                return match.group(1)
+        return parts[0]
 
     def create_campaign_paused(
         self,

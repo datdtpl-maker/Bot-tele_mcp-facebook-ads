@@ -48,6 +48,7 @@ TELEGRAM_ALLOWED_USER_IDS=telegram_user_id_cua_ban
 META_ACCESS_TOKEN=token_meta
 META_GRAPH_API_VERSION=v22.0
 DEFAULT_AD_ACCOUNT_ID=act_1234567890
+BOT_TIMEZONE=Asia/Bangkok
 
 SAFE_MODE=true
 ```
@@ -67,6 +68,51 @@ python telegram_bot.py
 Bot dùng long polling, phù hợp chạy trên máy cá nhân hoặc VPS nhỏ.
 
 ## Lệnh Telegram
+
+Bot hỗ trợ 2 kiểu thao tác:
+
+- Nhắn tự nhiên như đang trao đổi với trợ lý.
+- Dùng lệnh slash cố định như `/campaigns`, `/analyze`, `/activate`.
+
+### Nhắn tự nhiên
+
+Các câu mẫu:
+
+```text
+Hôm nay có bao nhiêu chiến dịch đang chạy?
+So sánh camp nào tốt nhất 7 ngày qua
+So sánh chiến dịch tin nhắn hôm nay
+So sánh ngân sách chiến dịch
+Trạng thái chiến dịch "Tên Camp"
+Bật chiến dịch "Tên Camp"
+Tắt chiến dịch "Tên Camp"
+Tắt campaign 120000000000000
+```
+
+Khi hỏi chiến dịch đang chạy, bật/tắt hoặc xem trạng thái, bot sẽ trả ra tên campaign và ID để người dùng kiểm tra lại trong Ads Manager.
+
+Khi `SAFE_MODE=true`, câu "Bật chiến dịch..." chỉ trả về dry-run và hướng dẫn dùng `/activate campaign_id CONFIRM` sau khi đã đổi `SAFE_MODE=false`.
+
+### Tạo chiến dịch từ tin nhắn Telegram
+
+Cú pháp nhắn tự nhiên:
+
+```text
+Tạo chiến dịch tin nhắn tên "Camp inbox A" act_123456789 page https://facebook.com/tenpage bài viết https://facebook.com/tenpage/posts/123
+Tạo chiến dịch chuyển đổi tên "Camp sale A" act_123456789 page https://facebook.com/tenpage bài viết https://facebook.com/tenpage/posts/123
+```
+
+Điều kiện bắt buộc:
+
+- Tin nhắn phải có `act_...`.
+- Phải có tên campaign trong dấu ngoặc kép sau chữ `tên`.
+- Phải có link Page và link bài viết.
+- Token Meta đang cấu hình phải truy cập được Page đó, và Page phải nằm trong danh sách `promote_pages` của tài khoản quảng cáo. Nếu tài khoản quảng cáo không có quyền quảng bá Page, bot sẽ báo lỗi và không tạo bản nháp.
+- Mặc định bot chỉ tạo preview/dry-run, chưa tạo ad set, creative, ad live và chưa tiêu tiền.
+
+Lý do chưa tạo ad live ngay từ link bài viết: để chạy thật cần thêm ngân sách, targeting, pixel/conversion event, optimization goal, billing event và bước duyệt trước khi bật. Phần campaign vẫn được tạo ở trạng thái `PAUSED` nếu dùng lệnh live.
+
+### Lệnh slash
 
 Xem dữ liệu:
 
