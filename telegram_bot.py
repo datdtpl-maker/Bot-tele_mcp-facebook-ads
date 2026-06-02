@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -12,12 +13,13 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 from ai_intent import openai_enabled, parse_intent
 from google_sheets_logger import log_action
 from supabase_store import load_session, save_session
+
 
 
 load_dotenv()
@@ -43,6 +45,58 @@ def default_daily_budget() -> int:
 
 def default_targeting() -> dict[str, Any]:
     return json.loads(os.getenv("DEFAULT_TARGETING", '{"geo_locations":{"countries":["VN"]},"age_min":18,"age_max":55}'))
+
+
+CITY_KEYS = {
+    "ha noi": "2580556",
+    "hanoi": "2580556",
+    "hn": "2580556",
+    "ho chi minh": "2583802",
+    "hcm": "2583802",
+    "sai gon": "2583802",
+    "saigon": "2583802",
+    "da nang": "2575168",
+    "danang": "2575168",
+    "dn": "2575168"
+}
+
+
+def build_targeting(intent: dict[str, Any]) -> dict[str, Any]:
+    targeting = {}
+    locations = intent.get("target_locations") or []
+    cities_to_add = []
+    countries_to_add = []
+    
+    for loc in locations:
+        loc_clean = normalize_text(loc).strip()
+        if loc_clean in CITY_KEYS:
+            cities_to_add.append({
+                "key": CITY_KEYS[loc_clean],
+                "radius": 40,
+                "distance_unit": "kilometer"
+            })
+        elif loc_clean in {"vn", "viet nam", "vietnam"}:
+            countries_to_add.append("VN")
+            
+    geo_locations = {}
+    if cities_to_add:
+        geo_locations["cities"] = cities_to_add
+    if countries_to_add or not geo_locations:
+        geo_locations["countries"] = ["VN"]
+        
+    targeting["geo_locations"] = geo_locations
+    
+    age_min = intent.get("target_age_min")
+    targeting["age_min"] = age_min if (age_min is not None and age_min > 0) else 18
+    
+    age_max = intent.get("target_age_max")
+    targeting["age_max"] = age_max if (age_max is not None and age_max > 0) else 55
+    
+    genders = intent.get("target_genders") or []
+    if genders:
+        targeting["genders"] = genders
+        
+    return targeting
 
 
 def default_pixel_id() -> str | None:
@@ -149,6 +203,115 @@ def format_analysis(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_accounts(result: dict[str, Any]) -> str:
+    data = result.get("data", [])
+    if not data:
+        return "Không tìm thấy tài khoản quảng cáo nào."
+    lines = ["📋 Danh sách tài khoản quảng cáo:"]
+    for idx, acc in enumerate(data, 1):
+        status_emoji = "🟢" if acc.get("account_status") == 1 else "🔴"
+        lines.append(
+            f"{idx}. {status_emoji} {acc.get('name')}\n"
+            f"   - ID: {acc.get('id')}\n"
+            f"   - Tiền tệ: {acc.get('currency')} | Múi giờ: {acc.get('timezone_name')}"
+        )
+    return "\n\n".join(lines)
+
+
+def format_campaigns_list(result: dict[str, Any]) -> str:
+    data = result.get("data", [])
+    if not data:
+        return "Không tìm thấy chiến dịch nào."
+    lines = ["📂 Danh sách chiến dịch:"]
+    for idx, camp in enumerate(data[:15], 1):
+        status = camp.get("status")
+        eff_status = camp.get("effective_status")
+        status_emoji = "🟢" if eff_status == "ACTIVE" or status == "ACTIVE" else "🔴"
+        
+        budget_str = "Không đặt"
+        if camp.get("daily_budget"):
+            budget_str = f"{money_minor_to_text(camp.get('daily_budget'))} daily"
+        elif camp.get("lifetime_budget"):
+            budget_str = f"{money_minor_to_text(camp.get('lifetime_budget'))} lifetime"
+            
+        lines.append(
+            f"{idx}. {status_emoji} {camp.get('name')}\n"
+            f"   - ID: {camp.get('id')}\n"
+            f"   - Mục tiêu: {camp.get('objective')}\n"
+            f"   - Ngân sách: {budget_str}\n"
+            f"   - Trạng thái: {eff_status}"
+        )
+    return "\n\n".join(lines)
+
+
+def format_adsets_list(result: dict[str, Any]) -> str:
+    data = result.get("data", [])
+    if not data:
+        return "Không tìm thấy nhóm quảng cáo nào."
+    lines = ["📦 Danh sách nhóm quảng cáo:"]
+    for idx, adset in enumerate(data[:15], 1):
+        status = adset.get("status")
+        eff_status = adset.get("effective_status")
+        status_emoji = "🟢" if eff_status == "ACTIVE" or status == "ACTIVE" else "🔴"
+        
+        budget_str = "Không đặt"
+        if adset.get("daily_budget"):
+            budget_str = f"{money_minor_to_text(adset.get('daily_budget'))} daily"
+        elif adset.get("lifetime_budget"):
+            budget_str = f"{money_minor_to_text(adset.get('lifetime_budget'))} lifetime"
+            
+        lines.append(
+            f"{idx}. {status_emoji} {adset.get('name')}\n"
+            f"   - ID: {adset.get('id')}\n"
+            f"   - Tối ưu: {adset.get('optimization_goal')} | Trả phí theo: {adset.get('billing_event')}\n"
+            f"   - Ngân sách: {budget_str}\n"
+            f"   - Trạng thái: {eff_status}"
+        )
+    return "\n\n".join(lines)
+
+
+def format_ads_list(result: dict[str, Any]) -> str:
+    data = result.get("data", [])
+    if not data:
+        return "Không tìm thấy quảng cáo nào."
+    lines = ["🖼️ Danh sách quảng cáo:"]
+    for idx, ad in enumerate(data[:15], 1):
+        status = ad.get("status")
+        eff_status = ad.get("effective_status")
+        status_emoji = "🟢" if eff_status == "ACTIVE" or status == "ACTIVE" else "🔴"
+        
+        lines.append(
+            f"{idx}. {status_emoji} {ad.get('name')}\n"
+            f"   - ID: {ad.get('id')}\n"
+            f"   - Trạng thái: {eff_status}"
+        )
+    return "\n\n".join(lines)
+
+
+def format_status(result: dict[str, Any]) -> str:
+    if not result:
+        return "Không tìm thấy thông tin đối tượng."
+    status = result.get("status")
+    eff_status = result.get("effective_status")
+    status_emoji = "🟢" if eff_status == "ACTIVE" or status == "ACTIVE" else "🔴"
+    
+    lines = [
+        f"🔍 Thông tin chi tiết ({result.get('name')}):",
+        f"- ID: {result.get('id')}",
+        f"- Trạng thái: {status_emoji} {status}",
+        f"- Trạng thái hiệu lực: {eff_status}",
+    ]
+    if "objective" in result:
+        lines.append(f"- Mục tiêu chiến dịch: {result.get('objective')}")
+    if "daily_budget" in result:
+        daily = result.get("daily_budget")
+        lifetime = result.get("lifetime_budget")
+        budget_str = f"{money_minor_to_text(daily)} daily" if daily else (f"{money_minor_to_text(lifetime)} lifetime" if lifetime else "Không đặt")
+        lines.append(f"- Ngân sách nhóm: {budget_str}")
+        lines.append(f"- Mục tiêu tối ưu: {result.get('optimization_goal')}")
+    return "\n".join(lines)
+
+
 def extract_account_id(text: str) -> str | None:
     match = re.search(r"\bact_\d+\b", text)
     return match.group(0) if match else default_account()
@@ -223,21 +386,28 @@ async def guard(update: Update) -> bool:
 async def reply_and_log(update: Update, command: str, payload: dict[str, Any], result: Any) -> None:
     user_id = update.effective_user.id if update.effective_user else None
     chat_id = update.effective_chat.id if update.effective_chat else None
-    log_action(user_id, chat_id, command, payload, result)
-    context = load_session(user_id)
+    await asyncio.to_thread(log_action, user_id, chat_id, command, payload, result)
+    context = await asyncio.to_thread(load_session, user_id)
     context.update({"last_command": command, "last_payload": payload, "last_result": result})
-    save_session(user_id, chat_id, context)
+    await asyncio.to_thread(save_session, user_id, chat_id, context)
     await update.message.reply_text(compact_json(result))
 
 
-async def text_reply_and_log(update: Update, command: str, payload: dict[str, Any], result: Any, text: str) -> None:
+async def text_reply_and_log(
+    update: Update,
+    command: str,
+    payload: dict[str, Any],
+    result: Any,
+    text: str,
+    reply_markup: Any = None,
+) -> None:
     user_id = update.effective_user.id if update.effective_user else None
     chat_id = update.effective_chat.id if update.effective_chat else None
-    log_action(user_id, chat_id, command, payload, result)
-    session = load_session(user_id)
+    await asyncio.to_thread(log_action, user_id, chat_id, command, payload, result)
+    session = await asyncio.to_thread(load_session, user_id)
     session.update({"last_command": command, "last_payload": payload, "last_result": result})
-    save_session(user_id, chat_id, session)
-    await update.message.reply_text(text[:3900])
+    await asyncio.to_thread(save_session, user_id, chat_id, session)
+    await update.message.reply_text(text[:3900], reply_markup=reply_markup)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -268,7 +438,8 @@ async def accounts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     payload = {"limit": 25}
     result = await call_mcp_tool("list_ad_accounts", payload)
-    await reply_and_log(update, "accounts", payload, result)
+    formatted = format_accounts(result)
+    await text_reply_and_log(update, "accounts", payload, result, formatted)
 
 
 async def campaigns(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -280,7 +451,8 @@ async def campaigns(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     payload = {"ad_account_id": ad_account_id, "limit": 25}
     result = await call_mcp_tool("list_campaigns", payload)
-    await reply_and_log(update, "campaigns", payload, result)
+    formatted = format_campaigns_list(result)
+    await text_reply_and_log(update, "campaigns", payload, result, formatted)
 
 
 async def adsets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -291,7 +463,8 @@ async def adsets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     payload = {"campaign_id": context.args[0], "limit": 25}
     result = await call_mcp_tool("list_adsets", payload)
-    await reply_and_log(update, "adsets", payload, result)
+    formatted = format_adsets_list(result)
+    await text_reply_and_log(update, "adsets", payload, result, formatted)
 
 
 async def ads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -302,7 +475,8 @@ async def ads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     payload = {"parent_id": context.args[0], "limit": 25}
     result = await call_mcp_tool("list_ads", payload)
-    await reply_and_log(update, "ads", payload, result)
+    formatted = format_ads_list(result)
+    await text_reply_and_log(update, "ads", payload, result, formatted)
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -311,9 +485,24 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if len(context.args) < 2:
         await update.message.reply_text("Vi du: /status campaign 120000000000000")
         return
-    payload = {"object_type": context.args[0], "object_id": context.args[1]}
+    object_type = context.args[0]
+    object_id = context.args[1]
+    payload = {"object_type": object_type, "object_id": object_id}
     result = await call_mcp_tool("get_status", payload)
-    await reply_and_log(update, "status", payload, result)
+    formatted = format_status(result)
+    
+    reply_markup = None
+    if object_type == "campaign" and "id" in result:
+        campaign_id = result["id"]
+        current_status = result.get("status")
+        keyboard = []
+        if current_status == "ACTIVE":
+            keyboard.append([InlineKeyboardButton("🔴 Tạm dừng (PAUSE)", callback_data=f"pause_{campaign_id}")])
+        else:
+            keyboard.append([InlineKeyboardButton("🟢 Kích hoạt (ACTIVE)", callback_data=f"activate_{campaign_id}")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+    await text_reply_and_log(update, "status", payload, result, formatted, reply_markup=reply_markup)
 
 
 def parse_account_dates(args: list[str]) -> tuple[str | None, str | None, str | None, list[str]]:
@@ -469,12 +658,22 @@ async def handle_ai_intent(update: Update, intent: dict[str, Any]) -> bool:
             )
             return True
         if name == "status":
+            campaign_id = match.get("id")
+            current_status = match.get("status")
+            keyboard = []
+            if current_status == "ACTIVE":
+                keyboard.append([InlineKeyboardButton("🔴 Tạm dừng (PAUSE)", callback_data=f"pause_{campaign_id}")])
+            else:
+                keyboard.append([InlineKeyboardButton("🟢 Kích hoạt (ACTIVE)", callback_data=f"activate_{campaign_id}")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             await text_reply_and_log(
                 update,
                 "ai_status",
                 found_payload,
                 match,
                 f"Campaign: {match.get('name')}\nID: {match.get('id')}\nStatus: {match.get('status')}\nEffective: {match.get('effective_status')}\nObjective: {match.get('objective')}",
+                reply_markup=reply_markup,
             )
             return True
         new_status = "ACTIVE" if name == "activate_campaign" else "PAUSED"
@@ -514,6 +713,7 @@ async def handle_ai_intent(update: Update, intent: dict[str, Any]) -> bool:
         if goal == "conversions" and not pixel_id:
             await update.message.reply_text("Campaign chuyen doi can DEFAULT_PIXEL_ID trong .env hoac bo sung pixel_id trong code parser truoc khi tao live.")
             return True
+
         payload = {
             "ad_account_id": ad_account_id,
             "name": intent["campaign_name"],
@@ -521,12 +721,21 @@ async def handle_ai_intent(update: Update, intent: dict[str, Any]) -> bool:
             "page_url": intent["page_url"],
             "post_url": intent["post_url"],
             "daily_budget": int(intent.get("daily_budget") or default_daily_budget()),
-            "targeting": default_targeting(),
+            "targeting": build_targeting(intent),
             "pixel_id": pixel_id,
             "conversion_event": default_conversion_event(),
         }
+
         if safe_mode() or not intent.get("wants_live"):
             result = await call_mcp_tool("preview_full_funnel", payload)
+            
+            keyboard = []
+            if safe_mode():
+                keyboard.append([InlineKeyboardButton("ℹ️ Safe Mode đang bật", callback_data="safe_mode_info")])
+            else:
+                keyboard.append([InlineKeyboardButton("🚀 Tạo thật (LIVE)", callback_data="create_live")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             await text_reply_and_log(
                 update,
                 "ai_full_funnel_preview",
@@ -538,7 +747,8 @@ async def handle_ai_intent(update: Update, intent: dict[str, Any]) -> bool:
                 f"- Creative: object_story_id={result['creative']['object_story_id']}\n"
                 f"- Ad: {result['ad']['name']}\n"
                 f"- Page: {result['page_access']['page_name']} | ID: {result['page_access']['page_id']}\n"
-                "Neu muon tao that: dat SAFE_MODE=false va nhan lai co chu live/CONFIRM_LIVE. Tat ca object van PAUSED.",
+                "Neu muon tao that: bam nut duoi day hoac nhan lai co chu live/CONFIRM_LIVE.",
+                reply_markup=reply_markup,
             )
             return True
         result = await call_mcp_tool("create_full_funnel_paused", payload)
@@ -553,6 +763,53 @@ async def handle_ai_intent(update: Update, intent: dict[str, Any]) -> bool:
             f"- Creative ID: {result['creative'].get('id')}\n"
             f"- Ad ID: {result['ad'].get('id')}\n"
             "Hay kiem tra trong Ads Manager truoc khi /activate campaign.",
+        )
+        return True
+
+    if name == "update_budget":
+        query = intent.get("campaign_query")
+        budget_val = intent.get("budget_value") or 0
+        obj_type = intent.get("budget_object_type") or "campaign"
+        
+        if not query:
+            await update.message.reply_text("Ban muon cap nhat ngan sach cho campaign/adset nao? Hay gui ten hoac ID.")
+            return True
+        if budget_val <= 0:
+            await update.message.reply_text("Vui long cung cap so tien ngan sach hop le.")
+            return True
+            
+        found_payload = {"ad_account_id": ad_account_id, "query": query, "limit": 100}
+        found = await call_mcp_tool("find_campaign", found_payload)
+        match = found.get("match")
+        if not match:
+            await text_reply_and_log(
+                update,
+                "ai_update_budget_find",
+                found_payload,
+                found,
+                "Minh chua tim duoc dung chien dich can doi ngan sach. Cac ung vien:\n" + campaign_lines(found.get("candidates", [])),
+            )
+            return True
+            
+        target_id = match["id"]
+        target_name = match["name"]
+        minor_budget = int(budget_val * 100)
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("🚀 Xác nhận đổi ngân sách", callback_data=f"upbudget_{obj_type}_{target_id}_{minor_budget}"),
+                InlineKeyboardButton("❌ Hủy", callback_data="cancel_action")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"Bạn có muốn cập nhật ngân sách cho chiến dịch:\n"
+            f"- Tên: {target_name}\n"
+            f"- ID: `{target_id}`\n"
+            f"- Ngân sách mới: {money_minor_to_text(minor_budget)} VND ({budget_val:,} VND)\n\n"
+            f"Nhấn nút dưới đây để xác nhận:",
+            reply_markup=reply_markup,
         )
         return True
 
@@ -579,7 +836,7 @@ async def natural_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         if openai_enabled():
             user_id = update.effective_user.id if update.effective_user else None
-            session = load_session(user_id)
+            session = await asyncio.to_thread(load_session, user_id)
             intent = parse_intent(text, session)
             handled = await handle_ai_intent(update, intent)
             if handled:
@@ -690,6 +947,14 @@ async def natural_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await update.message.reply_text("Campaign chuyen doi can DEFAULT_PIXEL_ID trong .env truoc khi tao full funnel.")
                 return
             result = await call_mcp_tool("preview_full_funnel", payload)
+            
+            keyboard = []
+            if safe_mode():
+                keyboard.append([InlineKeyboardButton("ℹ️ Safe Mode đang bật", callback_data="safe_mode_info")])
+            else:
+                keyboard.append([InlineKeyboardButton("🚀 Tạo thật (LIVE)", callback_data="create_live")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
             await text_reply_and_log(
                 update,
                 "natural_preview_full_funnel",
@@ -701,6 +966,7 @@ async def natural_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"- Creative: object_story_id={result['creative']['object_story_id']}\n"
                 f"- Page: {result['page_access']['page_name']} | ID: {result['page_access']['page_id']}\n"
                 "- Trang thai: dry-run, chua tao/chua tieu tien.",
+                reply_markup=reply_markup,
             )
             return
 
@@ -736,6 +1002,109 @@ async def natural_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(f"Khong thuc hien duoc: {exc}")
 
 
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    data = query.data
+    
+    if data == "safe_mode_info":
+        await query.answer(
+            text="Hãy chỉnh sửa SAFE_MODE=false trong file .env để cho phép kích hoạt/tạo thật.",
+            show_alert=True
+        )
+        return
+
+    if data.startswith("activate_") or data.startswith("pause_"):
+        action, object_id = data.split("_", 1)
+        new_status = "ACTIVE" if action == "activate" else "PAUSED"
+        payload = {"campaign_id": object_id, "status": new_status}
+        
+        if safe_mode() and new_status == "ACTIVE":
+            await query.answer(
+                text="Không thể kích hoạt vì SAFE_MODE đang bật.",
+                show_alert=True
+            )
+            return
+            
+        try:
+            result = await call_mcp_tool("set_campaign_status", payload)
+            verb = "Đã bật" if new_status == "ACTIVE" else "Đã tắt"
+            await query.edit_message_text(
+                text=f"{query.message.text}\n\n🔄 {verb} thành công chiến dịch (ID: {object_id})!"
+            )
+            await asyncio.to_thread(log_action, user_id, query.message.chat_id, new_status.lower(), payload, result)
+        except Exception as exc:
+            await query.edit_message_text(
+                text=f"{query.message.text}\n\n❌ Lỗi khi thay đổi trạng thái: {exc}"
+            )
+
+    elif data == "create_live":
+        session = await asyncio.to_thread(load_session, user_id)
+        last_command = session.get("last_command")
+        last_payload = session.get("last_payload")
+        
+        if not last_payload or last_command not in {"ai_full_funnel_preview", "natural_preview_full_funnel"}:
+            await query.answer(
+                text="Không tìm thấy phiên bản nháp phù hợp để tạo. Vui lòng gửi lại yêu cầu tạo.",
+                show_alert=True
+            )
+            return
+            
+        try:
+            await query.edit_message_text(
+                text=f"{query.message.text}\n\n⏳ Đang tiến hành tạo chiến dịch live..."
+            )
+            result = await call_mcp_tool("create_full_funnel_paused", last_payload)
+            success_text = (
+                f"✅ Đã tạo full funnel ở trạng thái PAUSED thành công:\n"
+                f"- Campaign ID: `{result['campaign'].get('id')}`\n"
+                f"- Ad set ID: `{result['adset'].get('id')}`\n"
+                f"- Creative ID: `{result['creative'].get('id')}`\n"
+                f"- Ad ID: `{result['ad'].get('id')}`\n\n"
+                f"Hãy kiểm tra trong Ads Manager trước khi kích hoạt chiến dịch."
+            )
+            await query.edit_message_text(text=success_text)
+            await asyncio.to_thread(log_action, user_id, query.message.chat_id, "create_full_funnel_live", last_payload, result)
+        except Exception as exc:
+            await query.edit_message_text(
+                text=f"{query.message.text}\n\n❌ Lỗi khi tạo chiến dịch live: {exc}"
+            )
+
+    elif data.startswith("upbudget_"):
+        parts = data.split("_")
+        if len(parts) >= 4:
+            obj_type = parts[1]
+            target_id = parts[2]
+            minor_budget = int(parts[3])
+            
+            payload = {
+                "object_type": obj_type,
+                "object_id": target_id,
+                "budget": minor_budget,
+                "budget_type": "daily"
+            }
+            
+            try:
+                await query.edit_message_text(
+                    text=f"{query.message.text}\n\n⏳ Đang tiến hành cập nhật ngân sách lên Meta Ads..."
+                )
+                result = await call_mcp_tool("update_budget", payload)
+                await query.edit_message_text(
+                    text=f"✅ Cập nhật ngân sách thành công cho {obj_type} (ID: {target_id})!\n"
+                         f"• Ngân sách mới: {money_minor_to_text(minor_budget)} VND."
+                )
+                await asyncio.to_thread(log_action, user_id, query.message.chat_id, "update_budget", payload, result)
+            except Exception as exc:
+                await query.edit_message_text(
+                    text=f"{query.message.text}\n\n❌ Lỗi khi cập nhật ngân sách: {exc}"
+                )
+                
+    elif data == "cancel_action":
+        await query.edit_message_text(text="🚫 Đã hủy thao tác.")
+
+
 def main() -> None:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     app = Application.builder().token(token).build()
@@ -753,6 +1122,7 @@ def main() -> None:
     app.add_handler(CommandHandler("pause", pause))
     app.add_handler(CommandHandler("activate", activate))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, natural_message))
+    app.add_handler(CallbackQueryHandler(handle_callback))
     app.run_polling()
 
 

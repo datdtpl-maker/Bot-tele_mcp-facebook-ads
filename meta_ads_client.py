@@ -386,16 +386,29 @@ class MetaAdsClient:
         parts = [part for part in parsed.path.split("/") if part]
         if not parts:
             raise MetaAdsError("page_url must contain a Page username or id")
-        if parts[0] == "profile.php":
+        if parts[0] in {"profile.php", "permalink.php"}:
             match = re.search(r"(?:^|[?&])id=([^&]+)", parsed.query)
             if match:
                 return match.group(1)
+        if parts[0] == "pages" and len(parts) >= 3:
+            return parts[2]
         return parts[0]
 
     def _post_id_from_url(self, post_url: str) -> str:
         parsed = urlparse(post_url)
+        if parsed.netloc in {"fb.watch", "fb.me", "facebook.com", "www.facebook.com", "m.facebook.com"}:
+            if parsed.netloc in {"fb.watch", "fb.me"}:
+                try:
+                    resp = requests.head(post_url, allow_redirects=True, timeout=5)
+                    post_url = resp.url
+                    parsed = urlparse(post_url)
+                except Exception:
+                    pass
         parts = [part for part in parsed.path.split("/") if part]
-        for marker in ["posts", "videos", "reel"]:
+        v_match = re.search(r"(?:^|[?&])v=([^&]+)", parsed.query)
+        if v_match:
+            return v_match.group(1)
+        for marker in ["posts", "videos", "reel", "reels"]:
             if marker in parts:
                 idx = parts.index(marker)
                 if idx + 1 < len(parts):
@@ -440,3 +453,9 @@ class MetaAdsClient:
         if status not in {"ACTIVE", "PAUSED"}:
             raise MetaAdsError("status must be ACTIVE or PAUSED")
         return self._request("POST", campaign_id, status=status)
+
+    def update_budget(self, object_id: str, object_type: str, budget: int, budget_type: str = "daily") -> dict[str, Any]:
+        if object_type not in {"campaign", "adset"}:
+            raise MetaAdsError("object_type must be campaign or adset")
+        field = "daily_budget" if budget_type == "daily" else "lifetime_budget"
+        return self._request("POST", object_id, **{field: budget})

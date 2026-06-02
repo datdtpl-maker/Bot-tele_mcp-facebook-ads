@@ -6,15 +6,17 @@ Project này tạo một MCP server nội bộ để quản lý Meta/Facebook Ad
 
 Đã có trong code:
 
-- Chiến dịch tin nhắn, chuyển đổi, leads, traffic bằng lệnh tạo campaign theo goal.
-- Chế độ test an toàn `SAFE_MODE=true`: bot chỉ preview/dry-run, không tạo campaign live.
-- Tạo campaign thật khi `SAFE_MODE=false` và lệnh có `CONFIRM_LIVE`; campaign vẫn được tạo ở trạng thái `PAUSED`.
-- Kiểm tra trạng thái `campaign`, `adset`, `ad`.
-- Xem campaign, ad set, ad.
-- Xem insights theo ngày ở cấp `campaign`, `adset`, hoặc `ad`.
-- Phân tích winner/loser và chọn kết quả tốt nhất theo goal `messages`, `conversions`, hoặc `leads`.
-- Ghi log thao tác vào Google Sheets nếu bật cấu hình.
-- Lưu ngữ cảnh phiên chat vào Supabase nếu bật cấu hình.
+- **Thiết lập mục tiêu và tạo chiến dịch nhanh**: Hỗ trợ mục tiêu chiến dịch tin nhắn (messages), chuyển đổi (conversions), leads, và lưu lượng truy cập (traffic) bằng lệnh tạo theo goal.
+- **Tích hợp nút bấm (Inline Keyboards)**: Hỗ trợ nút bấm bật/tắt (🟢 Kích hoạt / 🔴 Tạm dừng) trực quan khi xem trạng thái chiến dịch, cùng nút bấm **[ 🚀 Tạo thật (LIVE) ]** hoặc **[ 🚀 Xác nhận đổi ngân sách ]** trực tiếp dưới tin nhắn chat.
+- **Tự động dịch Targeting bằng AI**: Sử dụng OpenAI trực tiếp phân tích các tin nhắn tự nhiên để lấy độ tuổi (`age_min`/`age_max`), giới tính, và địa điểm (Hà Nội, Hồ Chí Minh, Đà Nẵng,...) thay vì dùng cấu hình cứng.
+- **Cập nhật ngân sách (Update Budget)**: Thay đổi ngân sách chiến dịch hoặc nhóm nhanh chóng bằng lệnh chat tự nhiên hoặc nút bấm xác nhận.
+- **Định dạng hiển thị trực quan (UX)**: Xem danh sách tài khoản, chiến dịch, nhóm quảng cáo, quảng cáo và trạng thái chi tiết theo mẫu có sẵn được căn chỉnh đẹp mắt kèm emoji trạng thái thay vì hiển thị JSON thô.
+- **Hỗ trợ link rút gọn và video**: Tự động nhận dạng và phân tích chuyển hướng cho link `fb.watch`, link Reels, Watch, link di động, link permalink phức tạp.
+- **Tránh chặn nghẽn (Async Thread Pool)**: Đọc/ghi cơ sở dữ liệu Supabase và ghi log Google Sheets trong Thread Pool bất đồng bộ giúp Telegram bot không bị nghẽn Event Loop.
+- **Chế độ test an toàn (`SAFE_MODE=true`)**: Bot chỉ preview/dry-run, không thay đổi thực tế trên Meta Ads.
+- **Tạo chiến dịch thật (`SAFE_MODE=false`)**: Tạo campaign ở trạng thái `PAUSED` để đảm bảo an toàn vận hành, quản trị viên cần kiểm tra Ads Manager trước khi kích hoạt.
+- **Phân tích hiệu suất**: So sánh hiệu quả chiến dịch (winner/loser) dựa trên các mục tiêu chuyển đổi, chi phí, ROAS và lượt tin nhắn.
+- **Ghi log & Lưu trữ**: Tự động lưu audit log vào Google Sheets và lưu vết ngữ cảnh phiên chat của từng Admin vào Supabase.
 
 Đã có flow full funnel an toàn: bot preview hoặc tạo `campaign + ad set + creative + ad` ở trạng thái `PAUSED`. Người quản trị vẫn cần kiểm tra Ads Manager trước khi bật chạy thật, nhất là targeting, ngân sách, pixel/conversion event và creative policy.
 

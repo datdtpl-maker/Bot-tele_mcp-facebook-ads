@@ -203,5 +203,21 @@ def set_campaign_status(campaign_id: str, status: str) -> dict[str, Any]:
     return MetaAdsClient().set_campaign_status(campaign_id=campaign_id, status=status)
 
 
+@mcp.tool()
+def update_budget(
+    object_id: str,
+    object_type: str,
+    budget: int,
+    budget_type: str = "daily",
+) -> dict[str, Any]:
+    """Update daily or lifetime budget for a campaign or adset."""
+    return MetaAdsClient().update_budget(
+        object_id=object_id,
+        object_type=object_type,
+        budget=budget,
+        budget_type=budget_type,
+    )
+
+
 if __name__ == "__main__":
     mcp.run()
